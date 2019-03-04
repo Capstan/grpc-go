@@ -20,9 +20,14 @@ package transport
 
 import (
 	"fmt"
+	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
 )
 
 func TestTimeoutEncode(t *testing.T) {
@@ -233,5 +238,28 @@ func TestDecodeMetadataHeader(t *testing.T) {
 		if !reflect.DeepEqual(v, test.vout) || !reflect.DeepEqual(err, test.err) {
 			t.Fatalf("decodeMetadataHeader(%q, %q) = %q, %v, want %q, %v", test.kin, test.vin, v, err, test.vout, test.err)
 		}
+	}
+}
+
+func TestHTTPStatusErrorPreferredOverContentTypeError(t *testing.T) {
+	frame := &http2.MetaHeadersFrame{
+		Fields: []hpack.HeaderField{
+			{
+				Name: "content-type",
+				Value: "text/html",
+			},
+		},
+	}
+	httpStatus := http.StatusUnauthorized
+	ds := &decodeState{httpStatus: &httpStatus}
+	err := ds.decodeHeader(frame)
+	if !strings.Contains(err.Error(), "Unauthenticated") {
+		t.Fatalf("decodeState should return an unauthenticated status: %v", err)
+	}
+	httpStatus = http.StatusOK
+	ds = &decodeState{httpStatus: &httpStatus}
+	err = ds.decodeHeader(frame)
+	if !strings.Contains(err.Error(), "unexpected content-type") {
+		t.Fatalf("decodeState should return an internal status: %v", err)
 	}
 }

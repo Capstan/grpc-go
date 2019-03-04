@@ -244,8 +244,22 @@ func (d *decodeState) decodeHeader(frame *http2.MetaHeadersFrame) error {
 	if frame.Truncated {
 		return status.Error(codes.Internal, "peer header list size exceeded limit")
 	}
+	var deferredErr error
 	for _, hf := range frame.Fields {
-		if err := d.processHeaderField(hf); err != nil {
+		// content-type is handled separately so that errors can be deferred until after higher-signal error sources can be considered.
+		if hf.Name == "content-type" {
+			contentSubtype, validContentType := contentSubtype(hf.Value)
+			if !validContentType {
+				deferredErr = status.Errorf(codes.Internal, "transport: received the unexpected content-type %q", hf.Value)
+			} else {
+				d.contentSubtype = contentSubtype
+				// TODO: do we want to propagate the whole content-type in the metadata,
+				// or come up with a way to just propagate the content-subtype if it was set?
+				// ie {"content-type": "application/grpc+proto"} or {"content-subtype": "proto"}
+				// in the metadata?
+				d.addMetadata(hf.Name, hf.Value)
+			}
+		} else if err := d.processHeaderField(hf); err != nil {
 			return err
 		}
 	}
@@ -273,6 +287,10 @@ func (d *decodeState) decodeHeader(frame *http2.MetaHeadersFrame) error {
 		return status.Error(code, http.StatusText(*(d.httpStatus)))
 	}
 
+	if deferredErr != nil {
+		return deferredErr
+	}
+
 	// gRPC status doesn't exist and http status is OK.
 	// Set rawStatusCode to be unknown and return nil error.
 	// So that, if the stream has ended this Unknown status
@@ -293,17 +311,6 @@ func (d *decodeState) addMetadata(k, v string) {
 
 func (d *decodeState) processHeaderField(f hpack.HeaderField) error {
 	switch f.Name {
-	case "content-type":
-		contentSubtype, validContentType := contentSubtype(f.Value)
-		if !validContentType {
-			return status.Errorf(codes.Internal, "transport: received the unexpected content-type %q", f.Value)
-		}
-		d.contentSubtype = contentSubtype
-		// TODO: do we want to propagate the whole content-type in the metadata,
-		// or come up with a way to just propagate the content-subtype if it was set?
-		// ie {"content-type": "application/grpc+proto"} or {"content-subtype": "proto"}
-		// in the metadata?
-		d.addMetadata(f.Name, f.Value)
 	case "grpc-encoding":
 		d.encoding = f.Value
 	case "grpc-status":
